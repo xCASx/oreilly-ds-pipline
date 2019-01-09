@@ -1,0 +1,229 @@
+{
+  "metadata" : {
+    "name" : "02_Yahoo Quotes Simulator",
+    "user_save_timestamp" : "1970-01-01T01:00:00.000Z",
+    "auto_save_timestamp" : "1970-01-01T01:00:00.000Z",
+    "language_info" : {
+      "name" : "scala",
+      "file_extension" : "scala",
+      "codemirror_mode" : "text/x-scala"
+    },
+    "trusted" : true,
+    "customLocalRepo" : "${HOME}/.ivy2",
+    "customRepos" : null,
+    "customDeps" : [ "com.typesafe.akka %% akka-http % 10.0.10", "org.apache.spark %% spark-streaming-kafka-0-8 % _", "- org.apache.spark %% spark-streaming % _", "- javax.jms % jms % _", "- com.sun.jdmk % jmxtools % _", "- com.sun.jmx %jmxri % _" ],
+    "customImports" : null,
+    "customArgs" : null,
+    "customSparkConf" : { }
+  },
+  "cells" : [ {
+    "metadata" : {
+      "id" : "53021DD8CAF4490B866F82E6F4722DB6"
+    },
+    "cell_type" : "markdown",
+    "source" : "# Collector Simulator Application\n\nThis Notebook works as a very simple collector application. \n\nIt reads data from a dump of the YahooQuote collector in Kafka and forwards it to Kafka. This implementation is not distributed, but still uses Akka Actors and so could be extended for a more concurrent approach to collecting data.\n\nPlease note that data collected may be copyrighted by Yahoo! Inc., and is governed by their usage license. "
+  }, {
+    "metadata" : {
+      "id" : "76E06BA4A3E54EC789E82620A702A643"
+    },
+    "cell_type" : "markdown",
+    "source" : "> **IMPORTANT**: this notebook has to be used in case the market are closed and no data is coming out the Yahoo's service.\n> Hence all relevant documentation regarding Akka and such aren't repeated and can be read in the [collector notebook](/notebooks/pipeline/01_Yahoo%20Quotes.snb)?"
+  }, {
+    "metadata" : {
+      "id" : "FC7A08B3A9C74058B9FD86B69515B5D7"
+    },
+    "cell_type" : "markdown",
+    "source" : "## Clean"
+  }, {
+    "metadata" : {
+      "id" : "E5FE1C910FF7473CAFA3ADF2ACD3DAAF"
+    },
+    "cell_type" : "markdown",
+    "source" : "No need for spark over here"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "E784291D5EBA4CC389640A432B157034"
+    },
+    "cell_type" : "code",
+    "source" : "sparkContext.stop()",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "1D1BA7D469FA4E848B34FC7517EF96E7"
+    },
+    "cell_type" : "markdown",
+    "source" : "### Variable pointing to the local file containing the YahooQuotes"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "0599E2E2F3DB477281A597F3F8072985"
+    },
+    "cell_type" : "code",
+    "source" : "val quotesFile = \"/tmp/data.txt\"",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "D373EF3F1C184FD0BB12B8F28EF44B60"
+    },
+    "cell_type" : "markdown",
+    "source" : "Fetching the cold data"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "35B8434FF6C340D693F01A5C14DC7204"
+    },
+    "cell_type" : "code",
+    "source" : ":sh wget https://s3-eu-west-1.amazonaws.com/data-fellas-pipeline/data.txt -O $quotesFile",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "D170EA201AD440D695EAB070497DB8DE"
+    },
+    "cell_type" : "markdown",
+    "source" : "### Imports for the Kafka producer"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "08F9D8970A5D4472ABE4B930D8AEA26A"
+    },
+    "cell_type" : "code",
+    "source" : "import java.util.Properties\nimport org.apache.kafka.clients.producer.{KafkaProducer,ProducerConfig,ProducerRecord}",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "1D419726FBE8455388574BEB0594D811"
+    },
+    "cell_type" : "markdown",
+    "source" : "### Instanciate the Kafka Producer"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "E042B92A18FC41E19032A814F5562B2B"
+    },
+    "cell_type" : "code",
+    "source" : "val props = new Properties()\nval broker = \"localhost:9092\"\nprops.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, broker)\nprops.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, \"org.apache.kafka.common.serialization.StringSerializer\")\nprops.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, \"org.apache.kafka.common.serialization.StringSerializer\")\nval producer = new KafkaProducer[String, String](props) ",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "C443D62AFA3348D489B783F50E96D60F"
+    },
+    "cell_type" : "markdown",
+    "source" : "### Iterator on the Quotes file content"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "442B3A0837924444834E5FCD0545850B"
+    },
+    "cell_type" : "code",
+    "source" : "import scala.io.Source\nval it = Source.fromFile(quotesFile).getLines()",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "C6E47B4383E94DB282E44D343F1B2A9F"
+    },
+    "cell_type" : "markdown",
+    "source" : "#### Let's have a look at the data"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "6CDCA1A000A2447B8C96424DE83578FA"
+    },
+    "cell_type" : "code",
+    "source" : "it.next",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "47146693BF0D40AD8CE071292B39A55D"
+    },
+    "cell_type" : "markdown",
+    "source" : "### Helper function to extract timestamp from textline"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "D50FE20C696A4E7481E6D05FEAB72CFC"
+    },
+    "cell_type" : "code",
+    "source" : "def tsExtract(s: String) = {\n  val pat = \"\"\"(\\d+),.*\"\"\".r\n  pat.findFirstMatchIn(s).map(x => x.subgroups(0).toLong)\n}",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "9BE027CBC87B45B7A020B5295FDFEB64"
+    },
+    "cell_type" : "markdown",
+    "source" : "### The Actor to simulate the quotes arrival the quotes and publish to Kafka"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "D094B0755F83486A897BDE2B80D4E138"
+    },
+    "cell_type" : "code",
+    "source" : "import akka.actor.Actor\nimport akka.http.scaladsl.Http\nimport akka.http.scaladsl.model._\nimport akka.util.ByteString\nimport akka.actor.ActorLogging\nimport akka.stream.ActorMaterializer\nimport akka.stream.ActorMaterializerSettings \n\nimport scala.io.Source\nimport org.apache.kafka.clients.producer.ProducerRecord\nimport scala.language.postfixOps\n\nclass QuotesCollector extends Actor\n  with ActorLogging {\n\n    final implicit val materializer: ActorMaterializer = \n                      ActorMaterializer(ActorMaterializerSettings(context.system))\n \n  import akka.pattern.pipe\n  import context.dispatcher\n  import scala.concurrent.duration._\n    \n  var speed = 1L\n\n  override def preStart() = {\n    val linesIter = Source.fromFile(quotesFile).getLines()\n    self ! (-1L, linesIter)\n  }\n \n  def receive = {\n    case (prev: Long, it: Iterator[_]) if (it.hasNext) =>\n      val line = it.next().toString\n    \n      val ts = tsExtract(line).get\n    \n      val delay = if (prev == -1) {\n                    0\n                  } else {\n                    (ts - prev) / speed\n                  }\n    \n      producer.send(new ProducerRecord[String, String](\"quotes\", null, line))\n    \n      // we schedule the next message after delay giving the current ts\n      context.system.scheduler.scheduleOnce(delay milliseconds, self, (ts, it))\n    case s: Long => speed = s\n  } \n}",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "8DD1C1AF934E42FC8B62CF1D9B4FE718"
+    },
+    "cell_type" : "code",
+    "source" : "implicit val system = akka.actor.ActorSystem()\nimport system.dispatcher\nimport akka.actor.Props",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "714D43CE468B4C0092E8AC518635E4D4"
+    },
+    "cell_type" : "code",
+    "source" : "val streamActor = system.actorOf(Props(new QuotesCollector()))",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "1140DF55651F422A9FBD96F93BCEB955"
+    },
+    "cell_type" : "markdown",
+    "source" : "## Increase time speed by 4"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "6BA9A55360A84B5181B1D7A89E43CD7D"
+    },
+    "cell_type" : "code",
+    "source" : "streamActor ! 10L",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "6BA696D5E39D4FF481B55FFE2BE2DB29"
+    },
+    "cell_type" : "code",
+    "source" : "",
+    "outputs" : [ ]
+  } ],
+  "nbformat" : 4
+}

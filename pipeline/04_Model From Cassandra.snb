@@ -1,0 +1,402 @@
+{
+  "metadata" : {
+    "name" : "Model From Cassandra",
+    "user_save_timestamp" : "1970-01-01T01:00:00.000Z",
+    "auto_save_timestamp" : "1970-01-01T01:00:00.000Z",
+    "language_info" : {
+      "name" : "scala",
+      "file_extension" : "scala",
+      "codemirror_mode" : "text/x-scala"
+    },
+    "trusted" : true,
+    "customLocalRepo" : "${HOME}/.ivy2",
+    "customRepos" : null,
+    "customDeps" : [ "com.datastax.spark %% spark-cassandra-connector % 2.0.0-M3", "- org.apache.spark %% spark-core % _", "- org.scala-lang % _ % _", "- org.spark-project.spark % _ % _", "- io.netty % _ % _", "- javax.jms % jms % _", "- com.sun.jdmk % jmxtools % _", "- com.sun.jmx % jmxri % _" ],
+    "customImports" : null,
+    "customArgs" : null,
+    "customSparkConf" : {
+      "spark.cassandra.connection.host" : "localhost"
+    }
+  },
+  "cells" : [ {
+    "metadata" : {
+      "id" : "3AE4B0A553204040A6245A56DE8BBDE1"
+    },
+    "cell_type" : "markdown",
+    "source" : "#ML Model from Quotes Data"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "7014A7B8CB2F4E878BFA0443559BEA27"
+    },
+    "cell_type" : "markdown",
+    "source" : "\n### Quick refresh:\n#### We have collected data from the Yahoo(TM) Finance API, streamed it through Kafka and collected it in Cassandra.\n\nNow, we are going to use that data to train a Linear Regression model to enable predictions on the financial data.\n\nIn Cassanda, this is the schema we read from:\n\n```sql\nCREATE TABLE quotes (\n  symbol text,\n  ts timestamp,\n  price: double,\n  volume: long\n  PRIMARY KEY (symbol, ts)\n);\n```\nThen we can query like this...\n\n```sql\nSELECT * FROM quote \n         WHERE symbol = 'IBM' AND ts >= 16500000  AND ts < 16750000;\n```"
+  }, {
+    "metadata" : {
+      "id" : "4A5369DF550A4A81AC6408E06F11D5DE"
+    },
+    "cell_type" : "markdown",
+    "source" : "## Define the Domain model"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "E27A0D9E46B3406FBBFF992BAC5465D6"
+    },
+    "cell_type" : "code",
+    "source" : "object model extends Serializable {\n  case class Quote(symbol: String, ts: Long, price: Double, volume: Long)\n}",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "B1A9AA2EC96B4DB2854F06578CA3BD40"
+    },
+    "cell_type" : "markdown",
+    "source" : "## Read the Quotes table from Cassandra as a Spark DataSet \nDataSet is a strong typed alternative to DataFrames and in general, the recommended way to deal with datasets in Spark moving forward."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "F60529A66F3C40F7BF183BAE78A9BDA8"
+    },
+    "cell_type" : "code",
+    "source" : "val quotesDS = sparkSession.read.format(\"org.apache.spark.sql.cassandra\")\n                          .options(Map(\"keyspace\" -> \"pipeline\", \"table\" -> \"quotes\"))\n                            .load()",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "02BDFD266D984E798AB068670242E50B"
+    },
+    "cell_type" : "markdown",
+    "source" : "Let's print the fisrt information fetched from cassandra."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "3BE4DF48B23C497F8B62260AD4DA15CF"
+    },
+    "cell_type" : "code",
+    "source" : "quotesDS",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "43987915CE3E4548926E024DE59D5DAC"
+    },
+    "cell_type" : "markdown",
+    "source" : "## Prepare the Quotes DataSet\nGroup by date to check number of stocks present at each timestamp to get rid of incomplete observations"
+  }, {
+    "metadata" : {
+      "id" : "77F30D59003948688D628A889BFDAB78"
+    },
+    "cell_type" : "markdown",
+    "source" : "First count number of symbols"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "B9B5CBF585514B9485BB5C106AB6D1B0"
+    },
+    "cell_type" : "code",
+    "source" : "val byDateCount = quotesDS.groupBy($\"ts\")\n                          .count\n                          .orderBy($\"count\".desc)\nval nbSymbols = byDateCount.agg(max(\"count\").as(\"maxc\")).map(_.getAs[Long](\"maxc\")).first",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "71D7F74BAAFE4AA786CC074E1FA519B1"
+    },
+    "cell_type" : "markdown",
+    "source" : "Select complete observations' timestamp"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "D6E9509AA4EC4958878D0613108E30BF"
+    },
+    "cell_type" : "code",
+    "source" : "val times = byDateCount.filter($\"count\" === nbSymbols).select($\"ts\" as \"ts\")\ntimes.count",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "581C8400283B40738CAD4F6EBF4E56E0"
+    },
+    "cell_type" : "markdown",
+    "source" : "Keep complete observations only (inner join of complete timestamps with original data)"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "E647050E143541B98969E3664D4B95B1"
+    },
+    "cell_type" : "code",
+    "source" : "val cleanDF = quotesDS.join(times, times(\"ts\") === quotesDS(\"ts\"))\n                      .select($\"symbol\", times(\"ts\"), $\"price\")\ncleanDF.count",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "7580810254E242FB8EDBB924CEDEA0D9"
+    },
+    "cell_type" : "markdown",
+    "source" : "Fetch list of valid symbols (always present)"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "D82572EF075443E49B963B048A349015"
+    },
+    "cell_type" : "code",
+    "source" : "val symbols = cleanDF.select($\"symbol\").groupBy(\"symbol\")\n                      .count.select($\"symbol\")\n                      .map(row => row.getAs[String](\"symbol\")).collect",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "EFCF37426DD8472481AE09B9C0CD9E31"
+    },
+    "cell_type" : "markdown",
+    "source" : "Make lift _JP Morgan_ (`JPM`) as the target (or label) for the predictions"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "DC11FAF9DABC4974AB925CDC0722B812"
+    },
+    "cell_type" : "code",
+    "source" : "val takeOutJPM_DF = cleanDF.withColumn(\"label\", when($\"symbol\" === \"JPM\", true).otherwise(false))\n                           .cache()",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "69E61C67F66B43E6964CEC02ED2F1E79"
+    },
+    "cell_type" : "markdown",
+    "source" : "Convert `DataFrame` into `RDD` to group on timestamp and transpose the list of values (column) into a row"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "1DBA4257859B483089B5BED153B04F99"
+    },
+    "cell_type" : "code",
+    "source" : "val takeOutJPM = takeOutJPM_DF.rdd\n                              .map { row => \n                                val tuple4 = (row.getAs[String](\"symbol\"), \n                                              row.getAs[java.util.Date](\"ts\").getTime, \n                                              row.getAs[Double](\"price\"),\n                                              row.getAs[Boolean](\"label\"))\n                                tuple4\n}",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "4DC8E9BE68E44C558FC3AA2ECC3D16FD"
+    },
+    "cell_type" : "markdown",
+    "source" : "Bring the `Row`s into `MLlib` world"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "54BB2F32D50444E28227D0EBA922D58D"
+    },
+    "cell_type" : "code",
+    "source" : "import org.apache.spark.mllib.linalg.{Vector, Vectors}\nimport org.apache.spark.mllib.regression.LabeledPoint",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "8C3BEC79A5F94DDF9CFEC513CC44DB8E"
+    },
+    "cell_type" : "markdown",
+    "source" : "Build the label point using the `JPM` as the label (4<sup>th</sup> value) and all other values as features.\n\nWe're building a matrix here using the features, hence we need to be consistent with the order in which the values (for the other symbols) are appearing in the features vector. Hence, we'll order them alphabetically (see `sortBy`)."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "FE42342525444C159849828A67041322"
+    },
+    "cell_type" : "code",
+    "source" : "val points = takeOutJPM.groupBy( elt => elt._2 )\n                         .mapValues{ it => \n                            val arr = it.toArray\n                            // keep JPM one, where label is true\n                            val label = arr.find(_._4).map(_._3).get\n                            // the remaining are sorted to form the feature vector \n                            //   on which the training/prediction will be performed\n                            val features = arr.filter(!_._4).sortBy(_._1).map(_._3)\n                            // adding the intercept is mandatory in order to allow the model\n                            //   to train a linear regression line that isn't constrained to cross the origin\n                            val featuresWithIntercept = Vectors.dense(1d +: features)\n                            // label point (the mllib representation of an observation)\n                            LabeledPoint(label, featuresWithIntercept)\n                         }\n                         .values\n",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "5E2E1B913EFB4BA5AE2B0BAD7F031579"
+    },
+    "cell_type" : "markdown",
+    "source" : "# Learning"
+  }, {
+    "metadata" : {
+      "id" : "A5E0CF6EC79544F690702EF2E6412038"
+    },
+    "cell_type" : "markdown",
+    "source" : "Build the model"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "82A2EE15D8AA476688F2370F989F83BA"
+    },
+    "cell_type" : "code",
+    "source" : "import org.apache.spark.mllib.optimization.{LBFGS, LeastSquaresGradient, SquaredL2Updater}\nimport org.apache.spark.mllib.regression.{LinearRegressionModel}",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "04B14D24D1FE40D8B3D3F7B780BEC154"
+    },
+    "cell_type" : "markdown",
+    "source" : "We'll learn the model from the data, hence keeping part of the data for validation makes sense.\n\nThe `seed` allows the training to be deterministically reproducible."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "A6BD858FB64C41DCB7F1015D4D0E4149"
+    },
+    "cell_type" : "code",
+    "source" : "val seed = 42L\nval Array(trainingData, validationData) = points.randomSplit(Array(0.7, 0.3), seed)",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "630841B56AB64AA588C2E585F9345FFF"
+    },
+    "cell_type" : "markdown",
+    "source" : "In the following, we'll train a regular linear model using the `LBFGS` optimizer (instead of `SGD` which performs generally poorly with distributed/paritioned data, see [for more information](https://amplab.cs.berkeley.edu/projects/splash/))."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "506C7206BD8B4410B340DA8E17F059BB"
+    },
+    "cell_type" : "code",
+    "source" : "def createModel(λ:Double = 0.01, trainingData:RDD[LabeledPoint]) = {\n  val one = trainingData.first\n  val numCorrections = 10\n  val convergenceTol = 1e-4\n  val maxNumIterations = 100\n  val regParam = λ\n  val initialWeightsWithIntercept = Vectors.dense(new Array[Double](one.features.size))\n  \n  val (weightsWithIntercept, loss) = LBFGS.runLBFGS(\n    trainingData.map(lp => (lp.label, lp.features)), // create the RDD[(Double, Vector)]\n    new LeastSquaresGradient(),                      // loss function\n    new SquaredL2Updater(),\n    numCorrections,\n    convergenceTol,\n    maxNumIterations,\n    regParam,\n    initialWeightsWithIntercept\n  )\n  \n  val model = new LinearRegressionModel(weightsWithIntercept, 0.0)\n  model\n}\n",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "1F4CC5DD9A09477C857F7C51C86784EC"
+    },
+    "cell_type" : "markdown",
+    "source" : "Create the function to predict an incoming value using the trained model."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "B8AE4ACB628F4EAFB3C4500468FA5718"
+    },
+    "cell_type" : "code",
+    "source" : "def predict(model:LinearRegressionModel, validationData:RDD[LabeledPoint]) = {\n  \n  val labelsAndPredictions = validationData.map { point =>\n                                                 val prediction = model.predict(point.features)\n                                                 (point.label, prediction)\n                                                }.toDF(\"point\", \"prediction\")\n  val withSe = labelsAndPredictions.withColumn(\"se\", pow($\"point\"-$\"prediction\", 2))\n  val testSqrtMSE = scala.math.sqrt(withSe.agg(mean(\"se\")).first.getAs[Double](0))\n  (model, testSqrtMSE)\n}\n",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "9C12882498B54B358878D9F86C55148F"
+    },
+    "cell_type" : "markdown",
+    "source" : "Function to run the training with different parameter, mainly the regression (L2) parameter."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "97382579A20A442EA9B99CE6B7785C4F"
+    },
+    "cell_type" : "code",
+    "source" : "def run(λ:Double = 0.01, \n        trainingData:RDD[LabeledPoint], \n        validationData:RDD[LabeledPoint],\n        plot:Option[Chart[Seq[(Double, Double)]]]=None) = {\n  val (model, err) = predict(createModel(λ, trainingData), validationData)\n  plot.foreach(_.addAndApply(Seq((λ, err)), true))\n  (model, err)\n}\n",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "F0DF0830572443D688D17859EFDACE15"
+    },
+    "cell_type" : "markdown",
+    "source" : "We run the training a first time with a small regularization."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "4C773568186B44B684DB397A5F44897C"
+    },
+    "cell_type" : "code",
+    "source" : "val (modelReg, err) = run(0.01, trainingData, validationData)",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "4774ACDE139B47EEB9520B91DCB71D1E"
+    },
+    "cell_type" : "markdown",
+    "source" : "A second training, but without regularization this time, we'll see that, even though the regularization is important, it's not always mandatory. "
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "0D5559D9A54B459980D0C065E2679097"
+    },
+    "cell_type" : "code",
+    "source" : "val (modelNoReg, woErr) = run(0, trainingData, validationData)",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "DAF3F80C53F2450F8C70526D9682BCF4"
+    },
+    "cell_type" : "markdown",
+    "source" : "We'll can keep the `modelNoReg` parameters for later predictions:"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "778DCE359AF84BE09147093716565D99"
+    },
+    "cell_type" : "code",
+    "source" : "val observedSymbols = symbols.filter(_ != \"JPM\").sorted\nval (intercept :: weights) = modelNoReg.weights.toArray.toList\nhtml(<h5>Intercept</h5>) ++\nhtml(<span>{intercept}</span>) ++ \nhtml(<h5>Weights</h5>) ++\nhtml(<ul>{weights.zip(observedSymbols).map{ case (x, f) => <li><strong>{f.mkString}</strong>: {x}</li>} }</ul>)",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "72440AE3E0DE45329A3EBE3B133BDD9D"
+    },
+    "cell_type" : "markdown",
+    "source" : "# Save the work"
+  }, {
+    "metadata" : {
+      "id" : "9A0C55D7CAC54DAA859C19FB8E729CF9"
+    },
+    "cell_type" : "markdown",
+    "source" : "First, we make sure the destination directory doesn't exist"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "E30795B71301426782F8A9EF71B63122"
+    },
+    "cell_type" : "code",
+    "source" : "def deleteDir(f: java.io.File): Unit = f match {\n  case null => \n  case _ => \n    Option(f.listFiles).foreach(l => l.foreach{file => if (file.isDirectory) deleteDir(file) else file.delete})\n    f.delete\n}",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "FF306B18089147E3838D6EFC0DABB774"
+    },
+    "cell_type" : "code",
+    "source" : "val modelTargetDir = \"/tmp/models/JPM-model\"\ndeleteDir(new java.io.File(modelTargetDir))",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "0F39C46ACE8945FE9F27479F5C49C08F"
+    },
+    "cell_type" : "markdown",
+    "source" : "Now we can save the freshly trained model"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "D38667A733C445E8A96F82113A1032C7"
+    },
+    "cell_type" : "code",
+    "source" : "modelNoReg.save(sc, modelTargetDir)",
+    "outputs" : [ ]
+  } ],
+  "nbformat" : 4
+}

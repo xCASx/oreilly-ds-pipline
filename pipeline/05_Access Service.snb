@@ -1,0 +1,249 @@
+{
+  "metadata" : {
+    "name" : "05_Access Service",
+    "user_save_timestamp" : "1970-01-01T00:00:00.000Z",
+    "auto_save_timestamp" : "1970-01-01T00:00:00.000Z",
+    "language_info" : {
+      "name" : "scala",
+      "file_extension" : "scala",
+      "codemirror_mode" : "text/x-scala"
+    },
+    "trusted" : true,
+    "customLocalRepo" : "${HOME}/.ivy2",
+    "customRepos" : null,
+    "customDeps" : [ "com.typesafe.akka %% akka-http % 10.0.10", "com.typesafe.akka %% akka-http-spray-json % 10.0.10", "com.datastax.spark %% spark-cassandra-connector % 2.0.0-M3", "- org.apache.spark %% spark-core % _", "- org.apache.spark %% spark-streaming % _", "- org.scala-lang % _ % _", "- org.spark-project.spark % _ % _", "- io.netty % _ % _", "- javax.jms % jms % _", "- com.sun.jdmk % jmxtools % _", "- com.sun.jmx % jmxri % _" ],
+    "customImports" : null,
+    "customArgs" : null,
+    "customSparkConf" : {
+      "spark.cores.max" : "2",
+      "spark.cassandra.connection.host" : "localhost",
+      "spark.executor.memory" : "512m",
+      "spark.cassandra.output.batch.grouping.key" : "None",
+      "spark.cassandra.output.batch.size.rows" : "10",
+      "spark.cassandra.output.batch.size.bytes" : "2048",
+      "spark.sql.shuffle.partitions" : "16"
+    }
+  },
+  "cells" : [ {
+    "metadata" : {
+      "id" : "1AB96EFE8D4248599D1A7CCE8B31BB24"
+    },
+    "cell_type" : "markdown",
+    "source" : "# Model Serving Endpoint\nThis notebook provides a service to query the Quotes dataset as well as the prediction model created in the previous step.\n"
+  }, {
+    "metadata" : {
+      "id" : "01FE392E5A6742388D3271B9F039C4BE"
+    },
+    "cell_type" : "markdown",
+    "source" : "### Our well know Domain Model\n(note that we could share it in a common library. Here we chose to add it explicitely for illustrative purposes)"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "95393E5BA201436B94A0E856ACBDAAE2"
+    },
+    "cell_type" : "code",
+    "source" : "object model extends Serializable {\n  import org.apache.spark.sql.Row\n\n  case class Quote(symbol: String, ts: Long, price: Double, volume: Int)\n\n  object Quote extends Serializable {\n    def fromRow(row: Row): Quote = {\n      Quote(\n        row.getAs[String](\"symbol\"),\n        row.getAs[java.util.Date](\"ts\").getTime/*java.lang.Long*/.toLong,\n        row.getAs[Double](\"price\"),\n        row.getAs[Int](\"volume\")\n      )\n    }\n  }\n}",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "52D50AEB7209406880F67A81F13DA833"
+    },
+    "cell_type" : "markdown",
+    "source" : "## Define the data source"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "9A359001CDCF41688C3A663950131017"
+    },
+    "cell_type" : "code",
+    "source" : "def allDF = sparkSession.read.format(\"org.apache.spark.sql.cassandra\")\n                        .options(Map(\"keyspace\" -> \"pipeline\", \"table\" -> \"quotes\"))\n                        .load()",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "6CEBC3375EB84E6292462B354F768C57"
+    },
+    "cell_type" : "code",
+    "source" : "allDF",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "57016221C53444659FDB5AC350A58AE5"
+    },
+    "cell_type" : "markdown",
+    "source" : "## Create Akka HTTP Server"
+  }, {
+    "metadata" : {
+      "id" : "04BE6F5E68C048F184EAEFCC6C17C0BA"
+    },
+    "cell_type" : "markdown",
+    "source" : "Now that we have created the access to our raw data in cassandra, we can elaborate a service able to serve them.\n\nHowever, there is also the prediction model that makes sense to also expose as a service.\n\nHere is how we can use the Akka HTTP **server** capability to create our own service serving both functionalities.\n\n> **IMPORTANT** the Akka framework for json exports is based on Spray which uses heavily implicits to convert data to string.\n> \n> This requires some information that the REPL has sometimes hard time to grab at once, so as weird as it seems, if you fall on an error executing the following cell... just **retry**"
+  }, {
+    "metadata" : {
+      "id" : "5EF50E4E48CD479885CD9A19AE1B65C1"
+    },
+    "cell_type" : "markdown",
+    "source" : "We start by defining three functions that will answer a specific need:\n* `all` returns the raw data from cassandra\n* `rangeQuery` scans the data for a given symbol between two dates\n* `predict` returns the result of the model applied to a given observation"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "31798346E0024A84B2ABADB4291BE702"
+    },
+    "cell_type" : "code",
+    "source" : "import org.apache.spark.mllib.linalg.Vectors\n\n// Complete dataset (truncated to the first 1000 elements)\ndef all: Seq[model.Quote] = allDF.take(1000)\n                                  .map(row => model.Quote.fromRow(row))\n                                  .toSeq\n\n\n// RANGE QUERY OVER THE DATA\ndef rangeQuery(symbol: String, start: Long, end: Long): Seq[model.Quote] = {\n  @transient val tf = new java.text.SimpleDateFormat(\"yyyy-MM-dd HH:mm:ss+SSS\")\n  val s = tf.format(new java.util.Date(start))\n  val e = tf.format(new java.util.Date(end))\n  \n  allDF.filter($\"symbol\" === symbol && $\"ts\" >= s && $\"ts\" < e )\n        .take(1000)\n        .map(row => model.Quote.fromRow(row))\n        .toSeq\n}\n\n\n// PREDICT JPM based on other stocks' last value\ndef predict:List[Double] = {\n  val last = {\n    // we get the last timestamp for the symbol\n    val g = allDF.groupBy($\"symbol\")\n                  .agg(max(\"ts\") as \"last\")\n                  .withColumnRenamed(\"symbol\", \"gsymbol\")\n    \n    // we fetch the information at the computed last ts by joining the result with the original data from cassandra\n    val lastQuotes = allDF.join(g, $\"ts\" === $\"last\" && $\"symbol\" === $\"gsymbol\")\n                            .select(\"symbol\", \"price\")\n\n    // we return the result as a list of symbol associated with the price ordered by symbol to respect the model's matrix\n    lastQuotes.collect\n              .toList\n              .map(r => r.getAs[String](\"symbol\") → r.getAs[Double](\"price\"))\n              .sortBy(_._1)\n  }\n  // we get the last data for JPM → the real value\n  val (_, jpm) = last.find(_._1 == \"JPM\").get\n  \n  // we get the last data for all but JPM stocks →  the features\n  val features = last.filter(_._1 != \"JPM\").map(_._2)\n \n  /* import from notebook: Model From Cassandra */\n  import org.apache.spark.mllib.regression.LinearRegressionModel\n  import org.apache.spark.mllib.linalg.Vectors\n  \n  // we read the model back from the storage\n  val rebuilt = LinearRegressionModel.load(sc, \"/tmp/models/JPM-model\") \n  \n  // we build the features adding the intercept to the mix\n  val featuresWithIntecept = (1d :: features).toArray\n  // we predict JPM passing the features as a Vector to respect the model's API\n  List(\n    rebuilt.predict(Vectors.dense(featuresWithIntecept))\n  )\n}\n\n\n// AKKA HTTP SERVER\nimport akka.actor.ActorSystem\nimport akka.http.scaladsl.Http\nimport akka.stream.ActorMaterializer\nimport akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._\nimport akka.http.scaladsl.server.Directives._\nimport scala.collection.JavaConverters._\n\n// the actor system to orchestrate the actors and requests\n@transient implicit val system = ActorSystem(\"rest-api-system\")\n\n// a materializer to transform a stream of results (to stream data back to caller)\n@transient implicit val materializer = ActorMaterializer()\n\n@transient val server = {\n  // import implicit default behavior to serialize data to Json\n  import spray.json.DefaultJsonProtocol\n\n  // we will serialize Quote...\n  object QuoteProtocol extends DefaultJsonProtocol {\n    // which are bags of 4 values\n    implicit val quoteFormat = jsonFormat4(model.Quote.apply) // case class => def apply(symbol: String, ts: Long, price: Double, volume: Int)\n  }\n  // import the protocol to implicitly activate the serialization\n  import QuoteProtocol._\n  \n  // we define the interface of the HTTP Server\n  val route =\n    // we define the get methods\n    get {\n      path(Segment) { (symbol) => // a one-element path `/<symbol>`\n        // this URL has to have 2 query parameters `/<symbol>?start=...&end=...`\n        parameters(\"start\".as[Long], \"end\".as[Long]) { (start, end) =>\n          // return the response\n          complete {\n            // fetches the information to be serialized in the response\n            rangeQuery(symbol, start, end)\n          }\n        }\n      } ~\n      path(\"all\") { // a non dynamic single-element path `/all`\n        complete(all)\n      } ~\n      path(\"predict\") { // a non dynamic single-element path `/predict`\n        complete(predict)\n      }\n    }\n\n  // Start the server bound on `localhost:1111`\n  Http().bindAndHandle(route, \"localhost\", 1111)\n}",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "D7EA386709B84D96A4E102AD8C4CFF90"
+    },
+    "cell_type" : "markdown",
+    "source" : "## Quick test using `curl`"
+  }, {
+    "metadata" : {
+      "id" : "DC5BFA30FF404F309A5B396446CDED55"
+    },
+    "cell_type" : "markdown",
+    "source" : "Get all values (max 100 though)"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "DEE8908969A84DB794EFB5824D335F79"
+    },
+    "cell_type" : "code",
+    "source" : "val allJ = scala.io.Source.fromURL(\"http://localhost:1111/all\").getLines.toList",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "presentation" : {
+        "tabs_state" : "{\n  \"tab_id\": \"#tab1219311599-0\"\n}",
+        "pivot_chart_state" : "{\n  \"hiddenAttributes\": [],\n  \"menuLimit\": 200,\n  \"cols\": [],\n  \"rows\": [],\n  \"vals\": [],\n  \"exclusions\": {},\n  \"inclusions\": {},\n  \"unusedAttrsVertical\": 85,\n  \"autoSortUnusedAttrs\": false,\n  \"inclusionsInfo\": {},\n  \"aggregatorName\": \"Count\",\n  \"rendererName\": \"Table\"\n}"
+      },
+      "id" : "C1039134F8A34BAFBBFB508B75AB8A29"
+    },
+    "cell_type" : "code",
+    "source" : "play.api.libs.json.Json.parse(allJ.mkString(\"\"))",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "94F00DE177EC4DBBB41B730400EC2225"
+    },
+    "cell_type" : "code",
+    "source" : "play.api.libs.json.Json.parse(allJ.mkString(\"\")).asInstanceOf[play.api.libs.json.JsArray].value.size",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "0594C6F7DBED4DDA852FD2261544FF0E"
+    },
+    "cell_type" : "code",
+    "source" : ":sh curl -s http://localhost:1111/all",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "EBF1C53D867442E4814E4DF439322DE5"
+    },
+    "cell_type" : "markdown",
+    "source" : "Get values for symbol between two dates"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "273BE013A70D4ACFA3E24068DC8D0567"
+    },
+    "cell_type" : "code",
+    "source" : "val s = allDF.orderBy($\"ts\".asc).first.getAs[java.sql.Timestamp](\"ts\").getTime\nval e = s + (10 * 60 * 1000)",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "B583E604B3B4453E80C3292AD80842D7"
+    },
+    "cell_type" : "code",
+    "source" : ":sh curl -s http://localhost:1111/IBM?start=$s&end=$e",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "2E9826526C4243B78D0570D6F344581C"
+    },
+    "cell_type" : "markdown",
+    "source" : "Predict last value for _JPM_"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "F9EA76BFCCA142C89353035090E5A97C"
+    },
+    "cell_type" : "code",
+    "source" : ":sh curl -s http://localhost:1111/predict",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "954C1E8DD10645CA8F278E2989196ED2"
+    },
+    "cell_type" : "code",
+    "source" : ":sh curl -s http://localhost:1111/predict",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "1025826BFC814977B7075689E1910027"
+    },
+    "cell_type" : "code",
+    "source" : "",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "B2A955ED282D4B2C890671E3C8DAECAF"
+    },
+    "cell_type" : "markdown",
+    "source" : "## Shutting down the service"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "592B9DBB36154E498AECB5771EB76659"
+    },
+    "cell_type" : "code",
+    "source" : "// shutdown \nserver.flatMap(_.unbind())(scala.concurrent.ExecutionContext.Implicits.global)",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : true,
+      "id" : "343E006CCC2B4767A4791401BD8233BF"
+    },
+    "cell_type" : "code",
+    "source" : "",
+    "outputs" : [ ]
+  } ],
+  "nbformat" : 4
+}

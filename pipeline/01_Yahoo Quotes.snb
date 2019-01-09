@@ -1,0 +1,231 @@
+{
+  "metadata" : {
+    "name" : "01_Yahoo Quotes",
+    "user_save_timestamp" : "1970-01-01T01:00:00.000Z",
+    "auto_save_timestamp" : "1970-01-01T01:00:00.000Z",
+    "language_info" : {
+      "name" : "scala",
+      "file_extension" : "scala",
+      "codemirror_mode" : "text/x-scala"
+    },
+    "trusted" : true,
+    "customLocalRepo" : "${HOME}/.ivy2",
+    "customRepos" : null,
+    "customDeps" : [ "com.typesafe.akka %% akka-http % 10.0.10", "org.apache.spark %% spark-streaming-kafka-0-8 % _", "- javax.jms % jms % _", "- com.sun.jdmk % jmxtools % _", "- com.sun.jmx %jmxri % _" ],
+    "customImports" : null,
+    "customArgs" : null,
+    "customSparkConf" : null
+  },
+  "cells" : [ {
+    "metadata" : {
+      "id" : "37CF20F9634647EB8E00F94DB9FFED3B"
+    },
+    "cell_type" : "markdown",
+    "source" : "# Collector Application\n\nThis Notebook works as a very simple collector application. \n\nIt reads data from YahooQuote (finance.yahoo.com) and forwards it to Kafka. This implementation is not distributed, but still uses Akka Actors and so could be extended for a more concurrent approach to collecting data.\n\nPlease note that data collected may be copyrighted by Yahoo! Inc., and is governed by their usage license. "
+  }, {
+    "metadata" : {
+      "id" : "07895A18DE9C4C91860FE0F1D391F127"
+    },
+    "cell_type" : "markdown",
+    "source" : "### Some variables used to build the http query to download quotes\n\nThe ```stockDayFormat``` variable selects the field requested to the Yahoo service, see http://search.cpan.org/~edd/Finance-YahooQuote/YahooQuote.pm for more information on the available fields. Perl developers will just love it :)."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "093451341A0E4625947C20620DA56579"
+    },
+    "cell_type" : "code",
+    "source" : "val URLBase = \"http://download.finance.yahoo.com/d/quotes.csv?e=.csv&f=\"\nval URLEnd = \"&s=\"\nval stockDayFormat = \"lsnpd1oml1vq\"",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "206C11AB1FBB41D498FE54A78E38732B"
+    },
+    "cell_type" : "markdown",
+    "source" : "### Helper Function to build url from list of symbols\n\nThe response from Yahoo will be a multiline csv, with one symbol data per line, columns being defined by the ```stockDayFormat```."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "5786D3DAA93D4F43868D20F05BE7CCD4"
+    },
+    "cell_type" : "code",
+    "source" : "def mkUrl(symbols: List[String]) = URLBase + stockDayFormat + URLEnd + \n                                 symbols.map(java.net.URLEncoder.encode(_,\"UTF-8\")).mkString(\"+\")",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "BC12CBAA7EF741DE976095906B818AE9"
+    },
+    "cell_type" : "code",
+    "source" : "mkUrl(List(\"CSCO\",\"IBM\", \"KO\"))",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "BCB7AA5936AE4AE981FC998EAA6527F5"
+    },
+    "cell_type" : "markdown",
+    "source" : "### Imports for the Kafka producer"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "20E1F7E63543400D9742F1CD52F336AA"
+    },
+    "cell_type" : "code",
+    "source" : "import java.util.Properties\nimport org.apache.kafka.clients.producer.{KafkaProducer,ProducerConfig,ProducerRecord}",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "86F69CB6F0AF4A3C9CD876CEDFCD4502"
+    },
+    "cell_type" : "markdown",
+    "source" : "### Instanciate the Kafka Producer"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "618661AAD67A4DA0B19BA1018674DF91"
+    },
+    "cell_type" : "code",
+    "source" : "val kafkaIP = \"localhost\"\nval props = new Properties()\nprops.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, s\"${kafkaIP}:9092\")\nprops.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, \"org.apache.kafka.common.serialization.StringSerializer\")\nprops.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, \"org.apache.kafka.common.serialization.StringSerializer\")\nval producer = new KafkaProducer[String, String](props)  \n",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "DA9D8F3617934FC48A747DD3305038AC"
+    },
+    "cell_type" : "markdown",
+    "source" : "### The Actor to trigger a download of the quotes and publish to Kafka"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "9AAB32E4A3FC418189E95C96EE5324A1"
+    },
+    "cell_type" : "code",
+    "source" : "val bc = BarChart(Seq((\"msgs\", 0)))\nbc",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "5DFD2B50A95E497A8B6541A1A0771B4F"
+    },
+    "cell_type" : "markdown",
+    "source" : "### We can also visualize a sample of the data flowing through the system\nThe list is initialized with a dash. That way we can also see if we received empty records"
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "28A151D82DA643EBB2508ACCAD89DFC1"
+    },
+    "cell_type" : "code",
+    "source" : "val listSize = 15\nval txt = ul(listSize)\n(0 to listSize).foreach(_ => txt.append(\"-\"))\ntxt",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "F91B6B6DC17D40B18770CCBAE5DA53C1"
+    },
+    "cell_type" : "markdown",
+    "source" : "## Define the Actor"
+  }, {
+    "metadata" : {
+      "id" : "62D8C5F5DFD144488D849D8B987DE4BF"
+    },
+    "cell_type" : "markdown",
+    "source" : "In the following cell, we will create the implementation of the collector as an `Actor`.\n\nTo do so, we will have to extends the `Actor` type, which only requires to implement the `receive` function.\n\nThis function acts as the definition of the behavior of the actor when it receives a message. It is simple, the function will be called onto all messages sent to the instance.\n\nHence, the implementation needs to take care of all messages the actor can deal with, the other will be simply discarded. That is why the easiest is to define the body as a bag of matchers `case`s.\n\nThe following implementation uses `Akka`'s reactive implementation of an HTTP client (`akka.http.scaladsl.Http`) which can\n* issue request `http.singleRequest`\n* the response is also a message that can be `pipeTo` another actor, whichever we like (even remote) - in our case, the collector will process it also\n* the response as an `entity` containing the information to be processed, however this entity can come in chunck and thus needs to be consumed asynchronously using `runFold` into a `ByteString`, which is piped to the current actor too\n* when the `ByteString` containing the data is fully received, the actor processes it as UTF-8 then publish it to Kafka (it will also update the chart and log a few lines).\n\nWe initialize this process by sending an initial message contaning one or several quotes symbols to retrieve."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "F44AEF6165794C658D02E7E134F53711"
+    },
+    "cell_type" : "code",
+    "source" : "import akka.actor.Actor\nimport akka.http.scaladsl.Http\nimport akka.http.scaladsl.model._\nimport akka.util.ByteString\nimport akka.actor.ActorLogging\nimport akka.stream.ActorMaterializer\nimport akka.stream.ActorMaterializerSettings \n\nimport org.apache.kafka.clients.producer.ProducerRecord\n\nclass QuotesCollector extends Actor\n  with ActorLogging {\n \n  final implicit val materializer: ActorMaterializer = \n                      ActorMaterializer(ActorMaterializerSettings(context.system))\n\n  import akka.pattern.pipe\n  import context.dispatcher\n \n  val http = Http(context.system)\n \n  override def preStart() = {\n  }\n \n  def receive = {\n    \n    case symbol: String                                   => self ! List(symbol)\n    \n    case symbols: List[_]                                 => http.singleRequest(\n                                 HttpRequest(uri = mkUrl(symbols.map(_.toString)) )).pipeTo(self)\n    \n    case HttpResponse(StatusCodes.OK, headers, entity, _) => pipe(\n                                entity.dataBytes.runFold(ByteString(\"\"))(_ ++ _)) to self\n    \n    case HttpResponse(code, _, _, _)                      => log.info(\"Request failed, response code: \" + code)\n    \n    case bs: ByteString                                   => \n      val msgs = bs.decodeString(\"utf-8\").lines.toList\n      msgs.foreach( l => producer.send(new ProducerRecord[String, String](\"quotes\", null,\n                                                                          s\"${System.currentTimeMillis},${l}\")) )\n      bc.addAndApply(Seq((\"msgs\", msgs.size)), true)\n      msgs.take(15).foreach(msg => txt.append(msg))\n    \n  } \n}",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "5F70A484E9384E108CCC1CE305C27005"
+    },
+    "cell_type" : "markdown",
+    "source" : "## Initialize the application"
+  }, {
+    "metadata" : {
+      "id" : "0B1AA993683E4FBAA67E9CFF9F174DE7"
+    },
+    "cell_type" : "markdown",
+    "source" : "When using Akka, you will need to create what is called an `ActorSystem`.\n\nThe actor system is the organizer that will deal with the dispatcher to assign messages from mailboxes to actor within available threads. Thus, it has an important role to play and not only the orchestration, but also to create top level actors. Afterwards, top level actor can create their own children.\n\nIn the following, we create a system with the name \"default\", obtains the current ClassLoader by first inspecting the current threads' getContextClassLoader, then tries to walk the stack to find the callers class loader, then falls back to the ClassLoader associated with the ActorSystem class. (see [Akka documentation](http://doc.akka.io/docs/akka/2.4/scala.html?_ga=1.126779909.982644571.1474026745)).\n\nThe system creates internally the message dispatcher that can be made implicitly available by importing it in the context."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "C7BA25AD50F4450EACE729E08BF10110"
+    },
+    "cell_type" : "code",
+    "source" : "implicit val system = akka.actor.ActorSystem()\nimport system.dispatcher",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "5E2ECF8F4CCF42A78CA320CD1436AB62"
+    },
+    "cell_type" : "markdown",
+    "source" : "## Create the actor instance"
+  }, {
+    "metadata" : {
+      "id" : "34D7002A03E4494785227E2EFE79CF0B"
+    },
+    "cell_type" : "markdown",
+    "source" : "The actor instance (or more precisely the `ActorRef`) can be created using the system's method `actorOf` that needs to be provided a way to create the instance behind (a factory).\n\nSo here `Props` is the generator and is provided the way to create the actor.\n\n> **IMPORTANT**: the code `new QuotesCollector` is not executed now, it's actually provided in a lazy way, it's like passing a function with no argument - or simply we pass a block of code."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "0C5261D97CF441CE8DC05402E8A02A1E"
+    },
+    "cell_type" : "code",
+    "source" : "import akka.actor.Props\nval streamActor = system.actorOf(Props(new QuotesCollector()))",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "id" : "71FC5CF0B6214FEF858A4C70968F435F"
+    },
+    "cell_type" : "markdown",
+    "source" : "## Schedule the collection"
+  }, {
+    "metadata" : {
+      "id" : "DD94363AE42349F589823F703C780077"
+    },
+    "cell_type" : "markdown",
+    "source" : "We are now ready to ask the system's scheduler to send a message at a given periodicity to fetch information from Yahoo.\n\nThis is simply done using the `schedule` method which takes an actor to which it'll has to send a given message.\n\nIn our case, we need to send the list of symbols every 10 seconds to the collector."
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "7C44EC22765E49A98BB6F4507012D84D"
+    },
+    "cell_type" : "code",
+    "source" : "import scala.language.postfixOps\nimport scala.concurrent.duration._\nimport system.dispatcher\n \n//Schedules to send the \"foo\"-message to the testActor after 50ms\nval consideredSymbols = List(\n                          \"DIA\",\"AAPL\",\"AXP\",\"BA\",\"CAT\",\"CSCO\",\"CVX\",\"DD\",\"DIS\",\"GE\",\"GS\",\"HD\",\"IBM\",\"INTC\",\"JNJ\",\n                          \"JPM\",\"KO\",\"MCD\",\"MMM\",\"MRK\",\"MSFT\",\"NKE\",\"PFE\",\"PG\",\"TRV\",\"UNH\",\"UTX\",\"VZ\",\"WMT\",\"XOM\"\n                        )\nsystem.scheduler.schedule(0 milliseconds, 10 seconds, streamActor, consideredSymbols)",
+    "outputs" : [ ]
+  }, {
+    "metadata" : {
+      "trusted" : true,
+      "input_collapsed" : false,
+      "collapsed" : false,
+      "id" : "B45C0ADE061743958583E52E8BE606B1"
+    },
+    "cell_type" : "code",
+    "source" : "",
+    "outputs" : [ ]
+  } ],
+  "nbformat" : 4
+}

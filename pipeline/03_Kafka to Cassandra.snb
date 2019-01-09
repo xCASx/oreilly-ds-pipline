@@ -1,0 +1,291 @@
+{
+  "metadata": {
+    "name": "Kafka to Cassandra",
+    "user_save_timestamp": "1970-01-01T01:00:00.000Z",
+    "auto_save_timestamp": "1970-01-01T01:00:00.000Z",
+    "language_info": {
+      "name": "scala",
+      "file_extension": "scala",
+      "codemirror_mode": "text/x-scala"
+    },
+    "trusted": true,
+    "customLocalRepo": "${HOME}/.ivy2",
+    "customRepos": null,
+    "customDeps": [
+      "org.apache.spark %% spark-streaming-kafka-0-8 % 2.1.0",
+      "org.apache.spark %% spark-streaming % 2.1.0",
+      "com.datastax.spark %% spark-cassandra-connector % 2.0.1",
+      "- org.apache.spark %% spark-core % _",
+      "- org.apache.spark %% spark-streaming % _",
+      "- org.scala-lang % _ % _",
+      "- org.spark-project.spark % _ % _",
+      "- io.netty % _ % _",
+      "- javax.jms % jms % _",
+      "- com.sun.jdmk % jmxtools % _",
+      "- com.sun.jmx % jmxri % _"
+    ],
+    "customImports": null,
+    "customArgs": null,
+    "customSparkConf": {
+      "spark.cassandra.connection.host": "localhost"
+    }
+  },
+  "cells": [
+    {
+      "metadata": {
+        "id": "A1D23727ADC341C7865DF5F2D635C86E"
+      },
+      "cell_type": "markdown",
+      "source": "#Streaming Financial Quotes\nIn this notebook we are going to implement a streaming job to persist quotes received from the API and streamed through Kafka into a Cassandra table."
+    },
+    {
+      "metadata": {
+        "id": "D567253445A9441B93AC56E55F6B0386"
+      },
+      "cell_type": "markdown",
+      "source": "## A time-series schema could look like...\n\nUsing the good advice of creating Cassandra schemas departing from the queries we want to execute on them, the proposed schema uses the symbol as partition key and the timestamp as clustering key. \n\nThis enables us to query time ranges for a specific symbol as shown below.\n\n```sql\nCREATE TABLE quotes (\n  symbol text,\n  ts timestamp,\n  price: double,\n  volume: long\n  PRIMARY KEY (symbol, ts)\n);\n```\nThen we can query like this...\n\n```sql\nSELECT * FROM quote \n         WHERE symbol = 'IBM' AND ts >= 16500000  AND ts < 16750000;\n```"
+    },
+    {
+      "metadata": {
+        "id": "3A3109202BFB4B618C3B55351C608DEE"
+      },
+      "cell_type": "markdown",
+      "source": "The schema of the table is representative to what we want to do with the data, which is essentially retrieve part of the information between two timestamp.\n\nThe primary key is then composed of the quotes we want the information for and its the timestamp. Associated to this key, the information is the price of the stock and its volume."
+    },
+    {
+      "metadata": {
+        "id": "7289FC0FD05543BFAB6C7F0DF7D01E37"
+      },
+      "cell_type": "markdown",
+      "source": "## Spark Cassandra Connector\n\nWe use the [Datastax Spark-Cassandra Connector](https://github.com/datastax/spark-cassandra-connector) to save our Spark Streaming data into Cassandra\n\nAlso, we use an instance of the connector to interact directly with Cassandra in order to create our keyspace and schema"
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "input_collapsed": false,
+        "collapsed": false,
+        "id": "3CDF13297F98410D8708054EEBB33047"
+      },
+      "cell_type": "code",
+      "source": "import com.datastax.spark.connector._\nimport com.datastax.spark.connector.cql.CassandraConnector",
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "input_collapsed": false,
+        "collapsed": false,
+        "id": "80CDBCE64EB149848497DC817EAC3F9D"
+      },
+      "cell_type": "code",
+      "source": "val cc = CassandraConnector(sparkContext.getConf)",
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "id": "279D5356179B4B7D8F9ED333A4D86F45"
+      },
+      "cell_type": "markdown",
+      "source": "We can create the keyspace using a CQL query executed by the session provided by the executor."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "input_collapsed": false,
+        "collapsed": false,
+        "id": "F929B541F64840418928FD8EBD8DD37B"
+      },
+      "cell_type": "code",
+      "source": "cc.withSessionDo { session => \n                  session.execute(s\"\"\"\n                    CREATE KEYSPACE IF NOT EXISTS pipeline \n                    WITH REPLICATION = { 'class':'SimpleStrategy', 'replication_factor':1}\n                  \"\"\"\n                  )\n                 }",
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "id": "AE58A3B9AEE34E469D2B86806629EA0A"
+      },
+      "cell_type": "markdown",
+      "source": "We can force the delete of the table..."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "input_collapsed": false,
+        "collapsed": false,
+        "id": "32F1D5149F2F4086AE47BD27049A961F"
+      },
+      "cell_type": "code",
+      "source": "cc.withSessionDo { session => \n                  session.execute(s\"\"\"\n                    DROP TABLE IF EXISTS pipeline.quotes\n                  \"\"\"\n                  )}",
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "id": "7B2A59A0FA244CAE87ABFE8A4284B1B9"
+      },
+      "cell_type": "markdown",
+      "source": "... and we can now create it using the format described above."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "input_collapsed": false,
+        "collapsed": false,
+        "id": "C234B3E9984043658850777F837CAA1A"
+      },
+      "cell_type": "code",
+      "source": "cc.withSessionDo { session => \n                  session.execute(s\"\"\"\n                  CREATE TABLE pipeline.quotes (\n                    symbol text,\n                    ts timestamp,\n                    price double,\n                    volume int,\n                    PRIMARY KEY (symbol, ts)\n                  )\n                  \"\"\"\n                  )}",
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "id": "C89A81C9E9AE4CAF95C64F43FC58532B"
+      },
+      "cell_type": "markdown",
+      "source": "## Define the Domain Model"
+    },
+    {
+      "metadata": {
+        "id": "380F3B6926C747909EBB4A63E3647970"
+      },
+      "cell_type": "markdown",
+      "source": "We like now to have a model representing the data we will deal with, to do so we can create the `class Quote` bagging the data and the `object Quote` defining how a Yahoo's data line need to be processed to extract the right data in an instance of `Quote`."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "input_collapsed": false,
+        "collapsed": false,
+        "id": "A71E06A13B454DC8B04B213A2DBC3676"
+      },
+      "cell_type": "code",
+      "source": "object model extends Serializable {\n  object Quote extends Serializable {\n    \n    val pat = \"\"\"(\\d+),[^,]*,\\\"([^\"]+)\\\",[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,([^,]*),(\\d+),.*\"\"\".r\n    \n    def parse(s: String): Option[Quote] = {\n      try {\n        pat.findFirstMatchIn(s)\n           .map { x => \n\n             val symbol = x.subgroups(1)\n             val ts = 1000*(x.subgroups(0).toLong/1000)\n             val price = x.subgroups(2).toDouble\n             val volume = x.subgroups(3).toLong\n\n             Quote(symbol, ts, price, volume)\n           }\n      } catch {\n        case _ : Throwable => None\n      }\n    }\n    \n  } \n  \n  case class Quote(symbol: String, ts: Long, price: Double, volume: Long)\n}",
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "id": "1C146DF2C003421E83447DFCB7A19879"
+      },
+      "cell_type": "markdown",
+      "source": "## Configure Spark Streaming\nWe create a Spark Streaming context to define the data we want to consume, in this case the Kafka topic \"quotes\", and how we want to process that data.\n\nIn Spark Streaming, we first declare the process we want to apply to the data and at the end we 'start' it, effectively initiating a continuous sequence of micro-batches that gather, process and store the streaming data."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "input_collapsed": false,
+        "collapsed": false,
+        "id": "C737266BB4DC4C9ABCF89D094101717B"
+      },
+      "cell_type": "code",
+      "source": "import org.apache.spark.streaming.Seconds\nimport org.apache.spark.streaming.StreamingContext\n\nStreamingContext.getActive.foreach(_.stop(false))\n@transient val ssc = new StreamingContext(sc, Seconds(20))",
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "id": "7043BA0DA8394F9495063E8DC89074B1"
+      },
+      "cell_type": "markdown",
+      "source": "### Kafka Consumer Configuration\n\nAs we want to consume the quotes streamed through kafka, we need to \"tell\" Spark Streaming how to connect to Kafka and what topic we want to consume.\n\nWe are going to use the **receiver-less** approach. This is a Spark Streaming mode in which the consuming process keeps track of offsets in Kafka and uses those offsets to determine blocks of data that Spark directly requests from the Kafka broker. \n\nAs the name implies, this model does not use \"receivers\": it is more reliable and has higher performance."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "input_collapsed": false,
+        "collapsed": false,
+        "id": "AE0D3854EB3C41E58A65B5EDD9C9EDDC"
+      },
+      "cell_type": "code",
+      "source": "import org.apache.spark.streaming.kafka.KafkaUtils\nimport org.apache.spark.streaming.Time\nimport kafka.serializer.StringDecoder\n\nval brokers = \"localhost:9092\"\nval topics = Set(\"quotes\")\nval kafkaParams = Map[String, String](\"metadata.broker.list\" -> brokers)\n\n// connect (direct) to kafka\n@transient val kafkaStream = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, topics)",
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "id": "2276FB12A3B34449B72B903C663B2B31"
+      },
+      "cell_type": "markdown",
+      "source": "### Declare Spark Streaming Process"
+    },
+    {
+      "metadata": {
+        "id": "0F76D756FAD24B778B38C5E1BAC1C41A"
+      },
+      "cell_type": "markdown",
+      "source": "In the following, we will define what needs to be done with the data extracted from kafka. Which is essentially:\n* parse\n* extract\n* format\n* save to casssandra\n\nTo do so, we will use Spark's `DataSet` which is a type safe version of `DataFrame` and thus build around a given type (`Quote`).\n\nThe DataSet is typed and its type is understood by the Spark engine, the cassandra connector is thus able to match the data contained in the DataSet and the table it is requested to save in.\n\nWhat we will is the following:\n- transform each minibatch into a stream of `Quote`s: `msgs`\n- read each minibatch (using `foreachRDD`)\n- convert batches as DataSet (`rdd.toDS`)\n- call the context-wise `write`r onto DataSet\n - specify that we request the cassandra connector using `format` and the relevant ID (`\"org.apache.spark.sql.cassandra\"`)\n - pass the strategy to append data\n - give the options telling the connector where to save the data (keyspace and table)\n - then validate the job calling `save`"
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "input_collapsed": false,
+        "collapsed": false,
+        "id": "2FB87D3F33DE4F15863DB061CCD35D79"
+      },
+      "cell_type": "code",
+      "source": "// transform the CSV Strings into quotes\n@transient val msgs = kafkaStream.transform { (message: RDD[(String, String)], batchTime: Time) => {\n    // convert each RDD from the batch into a DataFrame\n    message.map(s => model.Quote.parse(s._2)).collect{case Some(q) => q}\n  }\n}",
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "input_collapsed": false,
+        "collapsed": false,
+        "id": "1F1F0FC7BBE54B1A82F3B4E31FBC790B"
+      },
+      "cell_type": "code",
+      "source": "import com.datastax.spark.connector.streaming._\nmsgs.saveToCassandra(\"pipeline\", \"quotes\")",
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "id": "F3283F5B66D24D6485F870510D065D68"
+      },
+      "cell_type": "markdown",
+      "source": "### Start the Streaming Process"
+    },
+    {
+      "metadata": {
+        "id": "CA2F841B49E448BC9657F5604D5A618C"
+      },
+      "cell_type": "markdown",
+      "source": "When everything has been configured, it is time to ask the Spark driver to start scheduling all the actions on the cluster.\n\nIt is crucial to understand that you cannot changes anything from now since all tasks are executed on executors, and thus cannot be changed... otherwise you would have batches processed differently than others, which means a recovery cannot be done easily (besides the fact that it wouldn't even make much sense)."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "input_collapsed": false,
+        "collapsed": false,
+        "id": "567DCA6684F145E88FF8119337475137"
+      },
+      "cell_type": "code",
+      "source": "ssc.start()",
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "id": "5674B8B07F74439588C253758EA8D980"
+      },
+      "cell_type": "markdown",
+      "source": "Issue the `ssc.stop()` command to stop the `streamingContext` and all registered streams.\n\nIn an actual application we would do\n`ssc.awaitTermination()` that lets the streaming application stay alive forever, until an external action stops it."
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "input_collapsed": false,
+        "collapsed": false,
+        "id": "31522C71703F48A98501948B60DF01F9"
+      },
+      "cell_type": "code",
+      "source": "ssc.stop()",
+      "outputs": []
+    },
+    {
+      "metadata": {
+        "trusted": true,
+        "input_collapsed": false,
+        "collapsed": true,
+        "id": "548FCF10AA304BB4BE8927C9A51A0378"
+      },
+      "cell_type": "code",
+      "source": "",
+      "outputs": []
+    }
+  ],
+  "nbformat": 4
+}
